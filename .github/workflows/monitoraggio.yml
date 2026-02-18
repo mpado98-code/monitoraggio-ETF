@@ -2,8 +2,8 @@ name: Invia Report Mercati
 
 on:
   schedule:
-    # Ogni venerdì alle 17:00 UTC = 18:00 Italia
-    - cron: '0 17 * * 5'
+    # Ogni venerdì alle 10:00 UTC = 11:00 Italia (inverno) / 12:00 Italia (estate)
+    - cron: '0 10 * * 5'
   workflow_dispatch:
 
 jobs:
