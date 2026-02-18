@@ -1,0 +1,30 @@
+name: Invia Report Mercati
+
+on:
+  schedule:
+    # Ogni venerdì alle 17:00 UTC = 18:00 Italia
+    - cron: '0 17 * * 5'
+  workflow_dispatch:
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Scarica il repository
+        uses: actions/checkout@v3
+      
+      - name: Configura Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      - name: Installa dipendenze
+        run: |
+          pip install -r requirements.txt
+      
+      - name: Esegui monitoraggio
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python monitoraggio.py
