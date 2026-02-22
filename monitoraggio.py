@@ -72,7 +72,7 @@ NOMI_LEGGIBILI = {
     'CL=F': 'Petrolio'
 }
 
-# --- CONFIGURAZIONE TICKER PER CATEGORIA (con ticker aggiornati per le valute) ---
+# --- CONFIGURAZIONE TICKER PER CATEGORIA ---
 TICKERS_CONFIG = {
     'INDICI': [
         '^GSPC', '^NDX', 'GC=F', 'SI=F', 'BTC-USD', '000001.SS',
@@ -114,7 +114,7 @@ PERIODI_GIORNI = {
 # --- FUNZIONI ---
 def get_nome_leggibile(ticker):
     """Restituisce il nome leggibile per un ticker"""
-    return NOMI_LEGGIBILI.get(ticker, ticker)  # Se non trovato, restituisce il ticker originale
+    return NOMI_LEGGIBILI.get(ticker, ticker)
 
 def get_freccia(rendimento):
     """Restituisce la freccia in base al segno del rendimento"""
@@ -312,7 +312,6 @@ def main():
                 risultati_categoria.append(risultati)
             df_categoria = pd.DataFrame(risultati_categoria)
             if not df_categoria.empty:
-                # Riordina colonne per avere Nome dopo Ticker
                 reports_dict[categoria] = df_categoria
     
     if not reports_dict:
