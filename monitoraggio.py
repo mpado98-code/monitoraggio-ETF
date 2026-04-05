@@ -5,11 +5,17 @@ from datetime import datetime, timedelta
 import requests
 import os
 import warnings
+import google.generativeai as genai
 warnings.filterwarnings('ignore')
 
 # --- CONFIGURAZIONE TELEGRAM ---
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
+
+# --- CONFIGURAZIONE GEMINI AI ---
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
+genai.configure(api_key=GEMINI_API_KEY)
+model = genai.GenerativeModel('gemini-1.5-flash')
 
 # --- DIZIONARIO PER I NOMI LEGGIBILI ---
 NOMI_LEGGIBILI = {
@@ -113,11 +119,9 @@ PERIODI_GIORNI = {
 
 # --- FUNZIONI ---
 def get_nome_leggibile(ticker):
-    """Restituisce il nome leggibile per un ticker"""
     return NOMI_LEGGIBILI.get(ticker, ticker)
 
 def get_freccia(rendimento):
-    """Restituisce la freccia in base al segno del rendimento"""
     if rendimento is None or pd.isna(rendimento):
         return "⏸️"
     elif rendimento > 0:
@@ -128,7 +132,6 @@ def get_freccia(rendimento):
         return "⚪ →"
 
 def calcola_deviazione_std(storico, giorni=30):
-    """Calcola la deviazione standard annualizzata degli ultimi N giorni"""
     if len(storico) < giorni:
         return None
     rendimenti_giornalieri = storico['Close'].pct_change().dropna().tail(giorni)
@@ -138,7 +141,6 @@ def calcola_deviazione_std(storico, giorni=30):
     return round(std_annualizzata, 2)
 
 def verifica_incrocio_medie_mobili(storico):
-    """Verifica la posizione del prezzo rispetto a MA50 e MA200"""
     if len(storico) < 200:
         return "Dati insufficienti"
     storico['MA50'] = storico['Close'].rolling(window=50).mean()
@@ -160,7 +162,6 @@ def verifica_incrocio_medie_mobili(storico):
         return "⚪ MISTO"
 
 def calcola_rendimenti(ticker, data_inizio, data_fine):
-    """Calcola i rendimenti percentuali per un ticker su vari periodi"""
     risultati = {'Ticker': ticker, 'Nome': get_nome_leggibile(ticker)}
     
     try:
@@ -192,7 +193,6 @@ def calcola_rendimenti(ticker, data_inizio, data_fine):
         risultati['DevStd 30gg'] = calcola_deviazione_std(storico)
         risultati['MA50/200'] = verifica_incrocio_medie_mobili(storico)
         
-        # Aggiungi frecce per i periodi principali
         for periodo in ['1 Settimana', '1 Mese', '3 Mesi', '6 Mesi', '1 Anno']:
             if periodo in risultati:
                 risultati[f'Freccia_{periodo}'] = get_freccia(risultati[periodo])
@@ -208,8 +208,63 @@ def calcola_rendimenti(ticker, data_inizio, data_fine):
     
     return risultati
 
+def genera_riassunto_ai(df_completo):
+    """Genera un riassunto strategico usando Google Gemini AI"""
+    
+    # Prepara i dati principali per il prompt
+    top_1_settimana = df_completo.nlargest(5, '1 Settimana')[['Nome', '1 Settimana', 'MA50/200']].to_string(index=False)
+    top_1_mese = df_completo.nlargest(5, '1 Mese')[['Nome', '1 Mese', 'MA50/200']].to_string(index=False)
+    top_3_mesi = df_completo.nlargest(5, '3 Mesi')[['Nome', '3 Mesi', 'MA50/200']].to_string(index=False)
+    top_6_mesi = df_completo.nlargest(5, '6 Mesi')[['Nome', '6 Mesi', 'MA50/200']].to_string(index=False)
+    top_1_anno = df_completo.nlargest(5, '1 Anno')[['Nome', '1 Anno', 'MA50/200']].to_string(index=False)
+    
+    # Asset con trend forte (sopra medie mobili)
+    trend_forte = df_completo[df_completo['MA50/200'].str.contains('SOPRA', na=False)][['Nome', 'MA50/200', '1 Mese', '3 Mesi']].head(5).to_string(index=False)
+    
+    prompt = f"""Sei un analista finanziario esperto. Basandoti sui dati seguenti, rispondi a queste domande:
+
+DATI PERFORMANCE (rendimenti % e trend):
+TOP 5 ULTIMA SETTIMANA (1S):
+{top_1_settimana}
+
+TOP 5 ULTIMO MESE (1M):
+{top_1_mese}
+
+TOP 5 ULTIMI 3 MESI (3M):
+{top_3_mesi}
+
+TOP 5 ULTIMI 6 MESI (6M):
+{top_6_mesi}
+
+TOP 5 ULTIMO ANNO (1A):
+{top_1_anno}
+
+ASSET CON TREND PIÙ FORTE (sopra medie mobili):
+{trend_forte}
+
+RICHIESTA:
+Fammi un riassunto di massimo 8 righe (medio) in italiano che risponda a:
+
+1. DOVE VANNO I FLUSSI? - Quali asset/mercati stanno raccogliendo più capitali (quelli con rendimenti migliori e trend positivi)
+
+2. BREVE TERMINE (1-6 mesi) - Quale potrebbe essere l'opzione di acquisto migliore? Perché?
+
+3. MEDIO TERMINE (6-12 mesi) - Quale asset ha le caratteristiche migliori per un orizzonte medio? Perché?
+
+4. LUNGO TERMINE (>3 anni) - Quale mercato/ETF consiglieresti per una strategia di lungo periodo? Perché?
+
+Usa un tono professionale ma chiaro. Evita elenchi puntati, usa frasi fluide. Non superare le 8 righe totali."""
+    
+    try:
+        response = model.generate_content(prompt)
+        riassunto = response.text.strip()
+        print("✅ Riassunto AI generato con successo")
+        return riassunto
+    except Exception as e:
+        print(f"❌ Errore generazione AI: {e}")
+        return "🤖 Servizio AI temporaneamente non disponibile. Report standard in arrivo."
+
 def formatta_categoria(categoria, df):
-    """Formatta UNA SOLA categoria per Telegram"""
     if df.empty:
         return ""
     
@@ -220,14 +275,11 @@ def formatta_categoria(categoria, df):
         ma_status = row.get('MA50/200', 'N/D')
         devstd = row.get('DevStd 30gg', 'N/D')
         
-        # Usa il nome leggibile invece del ticker
         riga = f"<b>{nome}</b> | {ma_status} | Vol: {devstd if devstd else 'N/D'}%\n"
         
-        # Aggiungi i rendimenti con frecce (ora include 6M e 1A)
         for periodo in ['1 Settimana', '1 Mese', '3 Mesi', '6 Mesi', '1 Anno']:
             freccia = row.get(f'Freccia_{periodo}', '')
             valore = row.get(periodo, None)
-            # Abbreviazioni più brevi per risparmiare spazio
             if periodo == '1 Settimana':
                 abbr = '1S'
             elif periodo == '1 Mese':
@@ -251,7 +303,6 @@ def formatta_categoria(categoria, df):
     return messaggio
 
 def formatta_top_performer(df_completo):
-    """Formatta solo la sezione TOP PERFORMER (ora include 6M e 1A)"""
     messaggio = "<b>🏆 TOP PERFORMER</b>\n─────────────────\n"
     
     for periodo in ['1 Settimana', '1 Mese', '3 Mesi', '6 Mesi', '1 Anno']:
@@ -259,7 +310,6 @@ def formatta_top_performer(df_completo):
             df_validi = df_completo[df_completo[periodo].notna()]
             if not df_validi.empty:
                 top3 = df_validi.nlargest(3, periodo)[['Nome', periodo]]
-                # Abbreviazione per il periodo
                 if periodo == '1 Settimana':
                     abbr = '1S'
                 elif periodo == '1 Mese':
@@ -281,7 +331,6 @@ def formatta_top_performer(df_completo):
     return messaggio
 
 def invia_telegram(messaggio):
-    """Invia un messaggio via Telegram"""
     if not messaggio.strip():
         return
     
@@ -318,21 +367,28 @@ def main():
         print("❌ Nessun report generato")
         return
     
-    # Invia intestazione
-    data_str = data_fine.strftime('%d/%m/%Y %H:%M')
-    invia_telegram(f"<b>📈 REPORT MERCATI - {data_str}</b>\n\n(Invio in più parti...)")
+    # Unisci tutti i dati per l'AI
+    df_completo = pd.concat(reports_dict.values(), ignore_index=True)
     
-    # Invia una categoria alla volta
+    # Genera riassunto AI
+    print("🤖 Generazione riassunto con Gemini AI...")
+    riassunto_ai = genera_riassunto_ai(df_completo)
+    
+    # Invia riassunto AI su Telegram
+    data_str = data_fine.strftime('%d/%m/%Y %H:%M')
+    invia_telegram(f"<b>📈 REPORT MERCATI - {data_str}</b>\n\n<b>🤖 ANALISI AI:</b>\n{riassunto_ai}")
+    
+    # Invia report completo (dettagli)
+    invia_telegram(f"\n<b>📊 DATI DETTAGLIATI</b>")
+    
     for categoria, df in reports_dict.items():
         msg_categoria = formatta_categoria(categoria, df)
         invia_telegram(msg_categoria)
     
-    # Invia top performer
-    df_completo = pd.concat(reports_dict.values(), ignore_index=True)
     msg_top = formatta_top_performer(df_completo)
     invia_telegram(msg_top)
     
-    print("✅ Report completato e inviato!")
+    print("✅ Report completo inviato!")
 
 if __name__ == "__main__":
     main()
