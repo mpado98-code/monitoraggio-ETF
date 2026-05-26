@@ -4,18 +4,17 @@ import numpy as np
 from datetime import datetime, timedelta
 import requests
 import os
+import html
 import warnings
-import google.generativeai as genai
 warnings.filterwarnings('ignore')
 
 # --- CONFIGURAZIONE TELEGRAM ---
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
-# --- CONFIGURAZIONE GEMINI AI ---
+# --- CONFIGURAZIONE GEMINI (Google AI Studio - free tier) ---
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-2.0-flash-exp')
+GEMINI_MODEL = "gemini-2.0-flash"  # gratuito, ottimo per analisi testuali
 
 # --- DIZIONARIO PER I NOMI LEGGIBILI ---
 NOMI_LEGGIBILI = {
@@ -31,22 +30,22 @@ NOMI_LEGGIBILI = {
     '^GDAXI': 'DAX',
     '^FTSE': 'FTSE100',
     '^VIX': 'VIX',
-    
-    # VALUTE (con nuovi ticker)
+
+    # VALUTE
     'JPYUSD=X': 'Yen$',
     'EURUSD=X': 'Euro$',
     'GBPUSD=X': 'GBP$',
     'CNYUSD=X': 'Yuan$',
     'CHFUSD=X': 'Franco$',
     'NOKUSD=X': 'NOK$',
-    
+
     # AZIONARIO
     'VWCE.MI': 'ALL WORLD',
     'CSSPX.MI': 'SP500€',
     'CSNDX.MI': 'NASDAQ€',
     'SWDA.MI': 'SVILUPPATI',
     'EIMI.MI': 'EMERGENTI',
-    
+
     # AZIONARIO GEO
     'XSX6.DE': 'Euro Stoxx',
     'SJPA.MI': 'Giappone',
@@ -54,24 +53,24 @@ NOMI_LEGGIBILI = {
     'XMBR.DE': 'Brasile',
     'XFVT.DE': 'Vietnam',
     'XMIN.MI': 'Indonesia',
-    
+
     # AZIONARIO SETTORIALE USA
     'SXLE.MI': 'Energia',
     'SXLU.MI': 'Utilities',
     'SXLV.MI': 'Sanità',
     'SXLI.MI': 'Industriali',
     'SXLK.MI': 'Tech',
-    
+
     # AZIONARIO EW
     'MWEQ.MI': 'ALL WORLD EW',
     'XDEW.MI': 'SP500 EW',
-    
+
     # OBBLIGAZIONI
     'CSBGU7.MI': 'Treasury 7-10',
     'CSBGE7.MI': 'Euro Govt 7-10',
     'SXRC.MU': 'Treasury 20+',
     'X25E.MI': 'Euro Govt 25+',
-    
+
     # ALTRO
     'SGLD.MI': 'Gold ETC',
     'PPFD.SG': 'Silver ETC',
@@ -108,12 +107,12 @@ TICKERS_CONFIG = {
 }
 
 PERIODI_GIORNI = {
-    '1 Settimana': 7, 
-    '1 Mese': 30, 
+    '1 Settimana': 7,
+    '1 Mese': 30,
     '3 Mesi': 90,
-    '6 Mesi': 180, 
-    '1 Anno': 365, 
-    '3 Anni': 1095, 
+    '6 Mesi': 180,
+    '1 Anno': 365,
+    '3 Anni': 1095,
     '5 Anni': 1825
 }
 
@@ -163,120 +162,64 @@ def verifica_incrocio_medie_mobili(storico):
 
 def calcola_rendimenti(ticker, data_inizio, data_fine):
     risultati = {'Ticker': ticker, 'Nome': get_nome_leggibile(ticker)}
-    
+
     try:
         azione = yf.Ticker(ticker)
         storico = azione.history(start=data_inizio, end=data_fine)
-        
+
         if storico.empty:
             print(f"⚠️ Nessun dato per {ticker}")
-            return {**risultati, **{nome: None for nome in PERIODI_GIORNI.keys()}, 
+            return {**risultati, **{nome: None for nome in PERIODI_GIORNI.keys()},
                     'DevStd 30gg': None, 'MA50/200': 'N/D'}
-        
+
         if storico.index.tz is not None:
             storico.index = storico.index.tz_localize(None)
-        
+
         prezzo_attuale = storico['Close'].iloc[-1]
         data_ultima = storico.index[-1]
-        
+
         for nome_periodo, giorni in PERIODI_GIORNI.items():
             data_target = data_ultima - timedelta(days=giorni)
             storico_periodo = storico[storico.index <= data_target]
-            
+
             if not storico_periodo.empty:
                 prezzo_passato = storico_periodo['Close'].iloc[-1]
                 rendimento = ((prezzo_attuale - prezzo_passato) / prezzo_passato) * 100
                 risultati[nome_periodo] = round(rendimento, 2)
             else:
                 risultati[nome_periodo] = None
-        
+
         risultati['DevStd 30gg'] = calcola_deviazione_std(storico)
         risultati['MA50/200'] = verifica_incrocio_medie_mobili(storico)
-        
+
         for periodo in ['1 Settimana', '1 Mese', '3 Mesi', '6 Mesi', '1 Anno']:
             if periodo in risultati:
                 risultati[f'Freccia_{periodo}'] = get_freccia(risultati[periodo])
-        
+
         print(f"✅ {ticker} -> {risultati['Nome']}: OK")
-                
+
     except Exception as e:
         print(f"❌ Errore con {ticker}: {str(e)[:50]}...")
         risultati = {**risultati, **{nome: None for nome in PERIODI_GIORNI.keys()},
                     'DevStd 30gg': None, 'MA50/200': 'N/D'}
         for periodo in ['1 Settimana', '1 Mese', '3 Mesi', '6 Mesi', '1 Anno']:
             risultati[f'Freccia_{periodo}'] = "⚠️"
-    
+
     return risultati
-
-def genera_riassunto_ai(df_completo):
-    """Genera un riassunto strategico usando Google Gemini AI"""
-    
-    # Prepara i dati principali per il prompt
-    top_1_settimana = df_completo.nlargest(5, '1 Settimana')[['Nome', '1 Settimana', 'MA50/200']].to_string(index=False)
-    top_1_mese = df_completo.nlargest(5, '1 Mese')[['Nome', '1 Mese', 'MA50/200']].to_string(index=False)
-    top_3_mesi = df_completo.nlargest(5, '3 Mesi')[['Nome', '3 Mesi', 'MA50/200']].to_string(index=False)
-    top_6_mesi = df_completo.nlargest(5, '6 Mesi')[['Nome', '6 Mesi', 'MA50/200']].to_string(index=False)
-    top_1_anno = df_completo.nlargest(5, '1 Anno')[['Nome', '1 Anno', 'MA50/200']].to_string(index=False)
-    
-    # Asset con trend forte (sopra medie mobili)
-    trend_forte = df_completo[df_completo['MA50/200'].str.contains('SOPRA', na=False)][['Nome', 'MA50/200', '1 Mese', '3 Mesi']].head(5).to_string(index=False)
-    
-    prompt = f"""Sei un analista finanziario esperto. Basandoti sui dati seguenti, rispondi a queste domande:
-
-DATI PERFORMANCE (rendimenti % e trend):
-TOP 5 ULTIMA SETTIMANA (1S):
-{top_1_settimana}
-
-TOP 5 ULTIMO MESE (1M):
-{top_1_mese}
-
-TOP 5 ULTIMI 3 MESI (3M):
-{top_3_mesi}
-
-TOP 5 ULTIMI 6 MESI (6M):
-{top_6_mesi}
-
-TOP 5 ULTIMO ANNO (1A):
-{top_1_anno}
-
-ASSET CON TREND PIÙ FORTE (sopra medie mobili):
-{trend_forte}
-
-RICHIESTA:
-Fammi un riassunto di massimo 8 righe (medio) in italiano che risponda a:
-
-1. DOVE VANNO I FLUSSI? - Quali asset/mercati stanno raccogliendo più capitali (quelli con rendimenti migliori e trend positivi)
-
-2. BREVE TERMINE (1-6 mesi) - Quale potrebbe essere l'opzione di acquisto migliore? Perché?
-
-3. MEDIO TERMINE (6-12 mesi) - Quale asset ha le caratteristiche migliori per un orizzonte medio? Perché?
-
-4. LUNGO TERMINE (>3 anni) - Quale mercato/ETF consiglieresti per una strategia di lungo periodo? Perché?
-
-Usa un tono professionale ma chiaro. Evita elenchi puntati, usa frasi fluide. Non superare le 8 righe totali."""
-    
-    try:
-        response = model.generate_content(prompt)
-        riassunto = response.text.strip()
-        print("✅ Riassunto AI generato con successo")
-        return riassunto
-    except Exception as e:
-        print(f"❌ Errore generazione AI: {e}")
-        return "🤖 Servizio AI temporaneamente non disponibile. Report standard in arrivo."
 
 def formatta_categoria(categoria, df):
     if df.empty:
         return ""
-    
+
     messaggio = f"<b>🏷️ {categoria}</b>\n─────────────────\n"
-    
+
     for _, row in df.iterrows():
         nome = row['Nome']
         ma_status = row.get('MA50/200', 'N/D')
         devstd = row.get('DevStd 30gg', 'N/D')
-        
+
         riga = f"<b>{nome}</b> | {ma_status} | Vol: {devstd if devstd else 'N/D'}%\n"
-        
+
         for periodo in ['1 Settimana', '1 Mese', '3 Mesi', '6 Mesi', '1 Anno']:
             freccia = row.get(f'Freccia_{periodo}', '')
             valore = row.get(periodo, None)
@@ -292,19 +235,19 @@ def formatta_categoria(categoria, df):
                 abbr = '1A'
             else:
                 abbr = periodo[:3]
-                
+
             if valore is not None and not pd.isna(valore):
                 riga += f"{abbr}: {freccia} {valore:+.2f}%  "
             else:
                 riga += f"{abbr}: ⏸️ N/D  "
-        
+
         messaggio += riga + "\n"
-    
+
     return messaggio
 
 def formatta_top_performer(df_completo):
     messaggio = "<b>🏆 TOP PERFORMER</b>\n─────────────────\n"
-    
+
     for periodo in ['1 Settimana', '1 Mese', '3 Mesi', '6 Mesi', '1 Anno']:
         if periodo in df_completo.columns:
             df_validi = df_completo[df_completo[periodo].notna()]
@@ -322,36 +265,154 @@ def formatta_top_performer(df_completo):
                     abbr = '1A'
                 else:
                     abbr = periodo
-                    
+
                 messaggio += f"\n<b>{abbr}:</b>\n"
                 for _, row in top3.iterrows():
                     freccia = get_freccia(row[periodo])
                     messaggio += f"  {freccia} {row['Nome']}: {row[periodo]:+.2f}%\n"
-    
+
     return messaggio
+
+def costruisci_sommario_per_ai(reports_dict):
+    """Compatta i dati in un testo leggibile dal modello AI."""
+    righe = []
+    for categoria, df in reports_dict.items():
+        righe.append(f"\n[{categoria}]")
+        for _, row in df.iterrows():
+            nome = row['Nome']
+            r1s = row.get('1 Settimana')
+            r1m = row.get('1 Mese')
+            r3m = row.get('3 Mesi')
+            r6m = row.get('6 Mesi')
+            r1a = row.get('1 Anno')
+            ma = row.get('MA50/200', 'N/D')
+            vol = row.get('DevStd 30gg', 'N/D')
+
+            def fmt(v):
+                return f"{v:+.2f}%" if (v is not None and not pd.isna(v)) else "N/D"
+
+            righe.append(
+                f"- {nome}: 1S={fmt(r1s)} | 1M={fmt(r1m)} | 3M={fmt(r3m)} | "
+                f"6M={fmt(r6m)} | 1A={fmt(r1a)} | Trend={ma} | Vol30g={vol}%"
+            )
+    return "\n".join(righe)
+
+def genera_recap_ai(reports_dict):
+    """Genera il recap finale via Google Gemini (free tier)."""
+    if not GEMINI_API_KEY:
+        return ("<b>🤖 ANALISI AI</b>\n─────────────────\n"
+                "⚠️ GEMINI_API_KEY non configurata: recap AI saltato.")
+
+    sommario = costruisci_sommario_per_ai(reports_dict)
+
+    prompt = f"""Sei un analista finanziario senior. Analizza i dati di mercato qui sotto e produci un report
+in ITALIANO seguendo ESATTAMENTE questa struttura (testo puro, niente markdown, niente asterischi, niente tag HTML):
+
+RIASSUNTO (esattamente 4 righe brevi):
+- riga 1
+- riga 2
+- riga 3
+- riga 4
+
+CONSIGLIO ACQUISTO - MEDIO PERIODO (6-12 mesi):
+Asset: <nome dell'asset/categoria presente nei dati>
+Motivazione: <2-3 righe, cita rendimenti specifici, trend MA50/200 e volatilità>
+
+CONSIGLIO ACQUISTO - BREVE PERIODO (1 mese):
+Asset: <nome>
+Motivazione: <2-3 righe con dati>
+
+DA EVITARE - MEDIO PERIODO (6-12 mesi):
+Asset: <nome>
+Motivazione: <2-3 righe argomentate sui rischi/sopravvalutazione/trend negativi>
+
+DA EVITARE - BREVE PERIODO (1 mese):
+Asset: <nome>
+Motivazione: <2-3 righe argomentate>
+
+Regole:
+1. Usa SOLO asset presenti nei dati sotto.
+2. Argomenta sempre con numeri concreti (es. rendimento 1M, 6M, volatilità, posizione vs MA).
+3. Sii conciso e professionale, niente disclaimer prolissi.
+4. Non usare grassetto, asterischi, markdown o HTML: solo testo semplice ed emoji.
+
+DATI:
+{sommario}
+"""
+
+    url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+           f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}")
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.5,
+            "maxOutputTokens": 1024,
+            "topP": 0.9
+        }
+    }
+
+    try:
+        resp = requests.post(url, json=payload, timeout=45)
+        resp.raise_for_status()
+        data = resp.json()
+        ai_text = data['candidates'][0]['content']['parts'][0]['text'].strip()
+
+        # Telegram HTML: escape dei caratteri speciali nel testo AI
+        ai_text_safe = html.escape(ai_text)
+
+        # Decora con emoji per leggibilità
+        ai_text_safe = (ai_text_safe
+                        .replace("RIASSUNTO", "📝 <b>RIASSUNTO</b>")
+                        .replace("CONSIGLIO ACQUISTO - MEDIO PERIODO",
+                                 "🟢 <b>ACQUISTO - MEDIO PERIODO</b>")
+                        .replace("CONSIGLIO ACQUISTO - BREVE PERIODO",
+                                 "🟢 <b>ACQUISTO - BREVE PERIODO</b>")
+                        .replace("DA EVITARE - MEDIO PERIODO",
+                                 "🔴 <b>DA EVITARE - MEDIO PERIODO</b>")
+                        .replace("DA EVITARE - BREVE PERIODO",
+                                 "🔴 <b>DA EVITARE - BREVE PERIODO</b>"))
+
+        messaggio = ("<b>🤖 ANALISI AI - RECAP &amp; RACCOMANDAZIONI</b>\n"
+                     "─────────────────\n\n"
+                     f"{ai_text_safe}\n\n"
+                     "<i>⚠️ Analisi automatizzata, non costituisce "
+                     "consulenza finanziaria.</i>")
+        return messaggio
+
+    except requests.exceptions.RequestException as e:
+        return ("<b>🤖 ANALISI AI</b>\n─────────────────\n"
+                f"⚠️ Errore chiamata Gemini: {html.escape(str(e)[:200])}")
+    except (KeyError, IndexError) as e:
+        return ("<b>🤖 ANALISI AI</b>\n─────────────────\n"
+                f"⚠️ Risposta Gemini non valida: {html.escape(str(e)[:200])}")
 
 def invia_telegram(messaggio):
     if not messaggio.strip():
         return
-    
+
+    # Telegram limita a 4096 caratteri; spezziamo se serve
+    MAX_LEN = 4000
+    parti = [messaggio[i:i + MAX_LEN] for i in range(0, len(messaggio), MAX_LEN)]
+
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        'chat_id': TELEGRAM_CHAT_ID,
-        'text': messaggio,
-        'parse_mode': 'HTML'
-    }
-    response = requests.post(url, json=payload)
-    print(f"Inviato: {len(messaggio)} caratteri - Status: {response.status_code}")
+    for parte in parti:
+        payload = {
+            'chat_id': TELEGRAM_CHAT_ID,
+            'text': parte,
+            'parse_mode': 'HTML',
+            'disable_web_page_preview': True
+        }
+        response = requests.post(url, json=payload)
+        print(f"Inviato: {len(parte)} caratteri - Status: {response.status_code}")
     return response
 
 def main():
     print("🚀 Avvio monitoraggio...")
-    
+
     data_fine = datetime.now()
-    data_inizio = data_fine - timedelta(days=5*365 + 100)
+    data_inizio = data_fine - timedelta(days=5 * 365 + 100)
     reports_dict = {}
-    
-    # Raccogli dati
+
     for categoria, tickers in TICKERS_CONFIG.items():
         if tickers:
             print(f"📊 Analizzo {categoria}...")
@@ -362,33 +423,28 @@ def main():
             df_categoria = pd.DataFrame(risultati_categoria)
             if not df_categoria.empty:
                 reports_dict[categoria] = df_categoria
-    
+
     if not reports_dict:
         print("❌ Nessun report generato")
         return
-    
-    # Unisci tutti i dati per l'AI
-    df_completo = pd.concat(reports_dict.values(), ignore_index=True)
-    
-    # Genera riassunto AI
-    print("🤖 Generazione riassunto con Gemini AI...")
-    riassunto_ai = genera_riassunto_ai(df_completo)
-    
-    # Invia riassunto AI su Telegram
+
     data_str = data_fine.strftime('%d/%m/%Y %H:%M')
-    invia_telegram(f"<b>📈 REPORT MERCATI - {data_str}</b>\n\n<b>🤖 ANALISI AI:</b>\n{riassunto_ai}")
-    
-    # Invia report completo (dettagli)
-    invia_telegram(f"\n<b>📊 DATI DETTAGLIATI</b>")
-    
+    invia_telegram(f"<b>📈 REPORT MERCATI - {data_str}</b>\n\n(Invio in più parti...)")
+
     for categoria, df in reports_dict.items():
         msg_categoria = formatta_categoria(categoria, df)
         invia_telegram(msg_categoria)
-    
+
+    df_completo = pd.concat(reports_dict.values(), ignore_index=True)
     msg_top = formatta_top_performer(df_completo)
     invia_telegram(msg_top)
-    
-    print("✅ Report completo inviato!")
+
+    # --- NUOVO: Recap AI come ultimo messaggio ---
+    print("🤖 Generazione recap AI...")
+    msg_ai = genera_recap_ai(reports_dict)
+    invia_telegram(msg_ai)
+
+    print("✅ Report completato e inviato!")
 
 if __name__ == "__main__":
     main()
