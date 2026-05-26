@@ -313,46 +313,45 @@ def genera_recap_ai(reports_dict):
 
     sommario = costruisci_sommario_per_ai(reports_dict)
 
-    prompt = f"""Sei un analista finanziario senior. Analizza i dati di mercato qui sotto e produci un report
-in ITALIANO seguendo ESATTAMENTE questa struttura (testo puro, niente markdown, niente asterischi, niente tag HTML):
+    prompt = f"""Sei un analista finanziario senior. Analizza i dati di mercato qui sotto e scrivi un report in ITALIANO seguendo ESATTAMENTE questa struttura. È OBBLIGATORIO completare TUTTE le 5 sezioni: non interrompere il testo a metà, non lasciare sezioni vuote.
 
-RIASSUNTO (esattamente 4 righe brevi):
-- riga 1
-- riga 2
-- riga 3
-- riga 4
+Formato richiesto (testo semplice, niente markdown, niente asterischi, niente HTML):
 
-CONSIGLIO ACQUISTO - MEDIO PERIODO (6-12 mesi):
-Asset: <nome dell'asset/categoria presente nei dati>
-Motivazione: <2-3 righe, cita rendimenti specifici, trend MA50/200 e volatilità>
+RIASSUNTO
+Scrivi 4 frasi complete (una per riga) sullo stato generale dei mercati: equity globale, obbligazionario, commodity/oro, valute. Cita almeno 2-3 numeri concreti.
 
-CONSIGLIO ACQUISTO - BREVE PERIODO (1 mese):
-Asset: <nome>
-Motivazione: <2-3 righe con dati>
+CONSIGLIO ACQUISTO - MEDIO PERIODO (6-12 mesi)
+Asset: [nome esatto preso dai dati]
+Motivazione: scrivi 3 frasi complete. Cita rendimento 6M e 1A, stato MA50/200 e volatilità. Spiega perché è una buona scelta a 6-12 mesi.
 
-DA EVITARE - MEDIO PERIODO (6-12 mesi):
-Asset: <nome>
-Motivazione: <2-3 righe argomentate sui rischi/sopravvalutazione/trend negativi>
+CONSIGLIO ACQUISTO - BREVE PERIODO (1 mese)
+Asset: [nome esatto preso dai dati]
+Motivazione: scrivi 3 frasi complete. Cita rendimento 1S e 1M, momentum, volatilità. Spiega perché ha senso entrare ora.
 
-DA EVITARE - BREVE PERIODO (1 mese):
-Asset: <nome>
-Motivazione: <2-3 righe argomentate>
+DA EVITARE - MEDIO PERIODO (6-12 mesi)
+Asset: [nome esatto preso dai dati]
+Motivazione: scrivi 3 frasi complete con argomentazione sui rischi (trend negativo, sopravvalutazione, volatilità elevata). Cita i numeri.
 
-Regole:
-1. Usa SOLO asset presenti nei dati sotto.
-2. Argomenta sempre con numeri concreti (es. rendimento 1M, 6M, volatilità, posizione vs MA).
-3. Sii conciso e professionale, niente disclaimer prolissi.
-4. Non usare grassetto, asterischi, markdown o HTML: solo testo semplice ed emoji.
+DA EVITARE - BREVE PERIODO (1 mese)
+Asset: [nome esatto preso dai dati]
+Motivazione: scrivi 3 frasi complete spiegando perché non comprare adesso, citando rendimento recente e volatilità.
 
-DATI:
+Regole rigide:
+- Usa SOLO asset presenti nei dati qui sotto.
+- Cita SEMPRE numeri concreti (%) presi dai dati.
+- Non ripetere lo stesso asset in più sezioni.
+- NON troncare il testo: completa tutte le 5 sezioni fino in fondo.
+- Niente markdown, niente asterischi, niente HTML, niente disclaimer aggiuntivi.
+
+DATI DI MERCATO:
 {sommario}
 """
 
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
-            "temperature": 0.5,
-            "maxOutputTokens": 1024,
+            "temperature": 0.4,
+            "maxOutputTokens": 3000,
             "topP": 0.9
         }
     }
@@ -380,8 +379,13 @@ DATI:
 
                 resp.raise_for_status()
                 data = resp.json()
-                ai_text = data['candidates'][0]['content']['parts'][0]['text'].strip()
-                print(f"✅ Recap AI generato con {modello}")
+                candidate = data['candidates'][0]
+                ai_text = candidate['content']['parts'][0]['text'].strip()
+                finish_reason = candidate.get('finishReason', 'UNKNOWN')
+                print(f"✅ Recap AI generato con {modello} "
+                      f"(finishReason={finish_reason}, len={len(ai_text)} char)")
+                if finish_reason == 'MAX_TOKENS':
+                    print("⚠️ Output troncato: aumentare maxOutputTokens.")
                 break
 
             except requests.exceptions.RequestException as e:
