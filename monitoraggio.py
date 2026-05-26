@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 import requests
 import os
 import html
+import time
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -14,7 +15,14 @@ TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
 # --- CONFIGURAZIONE GEMINI (Google AI Studio - free tier) ---
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
-GEMINI_MODEL = "gemini-2.0-flash"  # gratuito, ottimo per analisi testuali
+# Lista di modelli da provare in ordine: se il primo dà 429, prova il successivo.
+# gemini-1.5-flash ha storicamente il free tier più generoso (15 RPM, 1500/giorno).
+GEMINI_MODELS_FALLBACK = [
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-latest",
+    "gemini-2.0-flash",
+    "gemini-2.5-flash",
+]
 
 # --- DIZIONARIO PER I NOMI LEGGIBILI ---
 NOMI_LEGGIBILI = {
@@ -340,8 +348,6 @@ DATI:
 {sommario}
 """
 
-    url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-           f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}")
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
@@ -351,40 +357,72 @@ DATI:
         }
     }
 
-    try:
-        resp = requests.post(url, json=payload, timeout=45)
-        resp.raise_for_status()
-        data = resp.json()
-        ai_text = data['candidates'][0]['content']['parts'][0]['text'].strip()
+    ai_text = None
+    ultimo_errore = "Nessun modello disponibile"
 
-        # Telegram HTML: escape dei caratteri speciali nel testo AI
-        ai_text_safe = html.escape(ai_text)
+    # Prova ciascun modello in ordine; per ognuno fa fino a 3 tentativi con backoff
+    for modello in GEMINI_MODELS_FALLBACK:
+        url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+               f"{modello}:generateContent?key={GEMINI_API_KEY}")
 
-        # Decora con emoji per leggibilità
-        ai_text_safe = (ai_text_safe
-                        .replace("RIASSUNTO", "📝 <b>RIASSUNTO</b>")
-                        .replace("CONSIGLIO ACQUISTO - MEDIO PERIODO",
-                                 "🟢 <b>ACQUISTO - MEDIO PERIODO</b>")
-                        .replace("CONSIGLIO ACQUISTO - BREVE PERIODO",
-                                 "🟢 <b>ACQUISTO - BREVE PERIODO</b>")
-                        .replace("DA EVITARE - MEDIO PERIODO",
-                                 "🔴 <b>DA EVITARE - MEDIO PERIODO</b>")
-                        .replace("DA EVITARE - BREVE PERIODO",
-                                 "🔴 <b>DA EVITARE - BREVE PERIODO</b>"))
+        for tentativo in range(3):
+            try:
+                resp = requests.post(url, json=payload, timeout=45)
 
-        messaggio = ("<b>🤖 ANALISI AI - RECAP &amp; RACCOMANDAZIONI</b>\n"
-                     "─────────────────\n\n"
-                     f"{ai_text_safe}\n\n"
-                     "<i>⚠️ Analisi automatizzata, non costituisce "
-                     "consulenza finanziaria.</i>")
-        return messaggio
+                if resp.status_code == 429:
+                    # Rate limit: aspetta in modo crescente (10s, 30s, 60s)
+                    attesa = [10, 30, 60][tentativo]
+                    print(f"⏳ 429 su {modello}, tentativo {tentativo+1}/3, "
+                          f"attendo {attesa}s...")
+                    time.sleep(attesa)
+                    ultimo_errore = f"429 (rate limit) su {modello}"
+                    continue
 
-    except requests.exceptions.RequestException as e:
+                resp.raise_for_status()
+                data = resp.json()
+                ai_text = data['candidates'][0]['content']['parts'][0]['text'].strip()
+                print(f"✅ Recap AI generato con {modello}")
+                break
+
+            except requests.exceptions.RequestException as e:
+                ultimo_errore = f"{modello}: {str(e)[:150]}"
+                print(f"❌ Errore {modello} tentativo {tentativo+1}: {ultimo_errore}")
+                if tentativo < 2:
+                    time.sleep(5)
+            except (KeyError, IndexError) as e:
+                ultimo_errore = f"{modello}: risposta non valida ({str(e)[:100]})"
+                print(f"❌ {ultimo_errore}")
+                break
+
+        if ai_text:
+            break  # Trovato un modello che funziona, esci dal loop
+
+    if not ai_text:
         return ("<b>🤖 ANALISI AI</b>\n─────────────────\n"
-                f"⚠️ Errore chiamata Gemini: {html.escape(str(e)[:200])}")
-    except (KeyError, IndexError) as e:
-        return ("<b>🤖 ANALISI AI</b>\n─────────────────\n"
-                f"⚠️ Risposta Gemini non valida: {html.escape(str(e)[:200])}")
+                f"⚠️ Tutti i modelli Gemini hanno fallito.\n"
+                f"Ultimo errore: {html.escape(ultimo_errore)}")
+
+    # Telegram HTML: escape dei caratteri speciali nel testo AI
+    ai_text_safe = html.escape(ai_text)
+
+    # Decora con emoji per leggibilità
+    ai_text_safe = (ai_text_safe
+                    .replace("RIASSUNTO", "📝 <b>RIASSUNTO</b>")
+                    .replace("CONSIGLIO ACQUISTO - MEDIO PERIODO",
+                             "🟢 <b>ACQUISTO - MEDIO PERIODO</b>")
+                    .replace("CONSIGLIO ACQUISTO - BREVE PERIODO",
+                             "🟢 <b>ACQUISTO - BREVE PERIODO</b>")
+                    .replace("DA EVITARE - MEDIO PERIODO",
+                             "🔴 <b>DA EVITARE - MEDIO PERIODO</b>")
+                    .replace("DA EVITARE - BREVE PERIODO",
+                             "🔴 <b>DA EVITARE - BREVE PERIODO</b>"))
+
+    messaggio = ("<b>🤖 ANALISI AI - RECAP &amp; RACCOMANDAZIONI</b>\n"
+                 "─────────────────\n\n"
+                 f"{ai_text_safe}\n\n"
+                 "<i>⚠️ Analisi automatizzata, non costituisce "
+                 "consulenza finanziaria.</i>")
+    return messaggio
 
 def invia_telegram(messaggio):
     if not messaggio.strip():
